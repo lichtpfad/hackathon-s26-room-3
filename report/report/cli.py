@@ -12,7 +12,10 @@ import json
 import sys
 from pathlib import Path
 
+from pathlib import Path
+
 from .merge import merge_reports
+from . import render as R
 
 _KIND_MARK = {
     "mechanical": "механика",
@@ -34,19 +37,44 @@ def main(argv=None) -> int:
     m = sub.add_parser("merge", help="слить JSON-выходы модулей в один отчёт")
     m.add_argument("inputs", nargs="+", help="файлы JSON-выходов (canon-lens/judge)")
     m.add_argument("--json", action="store_true", help="выдать единый JSON-контракт")
+
+    r = sub.add_parser("run", help="прогнать файл через весь конвейер и показать отчёт")
+    r.add_argument("file", help="входной текст (черновик)")
+    r.add_argument("--canon", default=None, help="канон (деф. canon-lens/canon.md)")
+    r.add_argument("--judge", choices=["live", "offline", "off"], default="live",
+                   help="смысловой слой: live (claude) | offline (фикстура) | off")
+    r.add_argument("--json", action="store_true", help="единый JSON-контракт")
+    r.add_argument("--html", metavar="FILE", help="сохранить HTML-отчёт в файл")
     a = p.parse_args(argv)
 
-    if a.cmd != "merge":
-        return 2
+    if a.cmd == "merge":
+        reports = [json.loads(Path(f).read_text(encoding="utf-8")) for f in a.inputs]
+        rep = merge_reports(reports)
+        if a.json:
+            print(json.dumps(rep, ensure_ascii=False, indent=2))
+        else:
+            print(R.render(rep))
+        return 1 if any(v.get("severity") == "error" for v in rep["violations"]) else 0
 
-    reports = [json.loads(Path(f).read_text(encoding="utf-8")) for f in a.inputs]
-    rep = merge_reports(reports)
+    if a.cmd == "run":
+        from .pipeline import run as pipe_run, PipelineError
+        canon = a.canon or str(Path(__file__).resolve().parents[2] / "canon-lens" / "canon.md")
+        try:
+            rep, text = pipe_run(a.file, canon, judge_mode=a.judge)
+        except PipelineError as e:
+            print(f"ошибка конвейера: {e}", file=sys.stderr)
+            return 2
+        if a.html:
+            Path(a.html).write_text(R.render_html(rep, text), encoding="utf-8")
+            print(f"HTML-отчёт: {a.html}", file=sys.stderr)
+        if a.json:
+            print(json.dumps(rep, ensure_ascii=False, indent=2))
+        else:
+            R.enable_windows_ansi()
+            print(R.render(rep, text))
+        return 1 if any(v.get("severity") == "error" for v in rep["violations"]) else 0
 
-    if a.json:
-        print(json.dumps(rep, ensure_ascii=False, indent=2))
-    else:
-        _pretty(rep)
-    return 1 if any(v.get("severity") == "error" for v in rep["violations"]) else 0
+    return 2
 
 
 def _pretty(rep: dict) -> None:
